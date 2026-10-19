@@ -1,0 +1,82 @@
+name: Mooncake Phase 1 FIFO patch validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase1-ci-harness
+    paths:
+      - 'phase1_fifo_patch.py'
+      - '.github/workflows/phase1-fifo.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  phase1:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout patch script from working branch
+        uses: actions/checkout@v4
+        with:
+          ref: phase1-ci-harness
+          submodules: false
+          persist-credentials: false
+
+      - name: Preserve patch script and checkout exact v0.3.13 source
+        shell: bash
+        run: |
+          cp phase1_fifo_patch.py /tmp/phase1_fifo_patch.py
+          git fetch --tags origin
+          git checkout --detach v0.3.13
+          cp /tmp/phase1_fifo_patch.py ./phase1_fifo_patch.py
+          git status --short
+          git rev-parse HEAD
+
+      - name: Apply Phase 1 patch generator
+        run: python3 phase1_fifo_patch.py
+
+      - name: Check patch formatting
+        run: |
+          git diff --check
+          test -s mooncake_fifo_phase1.patch
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build git pkg-config patchelf \
+            libibverbs-dev libunwind-dev libgoogle-glog-dev libjsoncpp-dev \
+            libnuma-dev libpython3-dev libboost-dev libssl-dev \
+            libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+            pybind11-dev libcurl4-openssl-dev libhiredis-dev libyaml-cpp-dev \
+            libjemalloc-dev libzstd-dev libmsgpack-dev libgflags-dev \
+            libxxhash-dev liburing-dev liblz4-dev
+
+      - name: Configure CMake
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_UNIT_TESTS=ON
+          -DWITH_TE=ON
+          -DWITH_STORE=ON
+          -DWITH_STORE_RUST=OFF
+          -DWITH_EP=OFF
+          -DUSE_CUDA=OFF
+
+      - name: Build FIFO and existing master service tests
+        run: cmake --build build --target master_service_fifo_test master_service_test -j2
+
+      - name: Run FIFO and existing master service tests
+        run: ctest --test-dir build --output-on-failure -R '^(master_service_fifo_test|master_service_test)$'
+
+      - name: Upload generated patch and test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mooncake-phase1-fifo-patch
+          path: |
+            mooncake_fifo_phase1.patch
+            build/Testing/Temporary/LastTest.log
+          if-no-files-found: warn
