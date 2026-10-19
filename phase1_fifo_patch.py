@@ -171,13 +171,11 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                             cursor = next;
                             continue;
                         }
-    
                         auto evict_result = try_evict_group_or_object(
                             cursor->tenant_id, cursor->user_key, metadata, shard,
                             tenant_state, deferred_replicas,
                             /*allow_soft_pinned=*/allow_soft_pinned);
                         total_freed_size += evict_result.freed_bytes;
-    
                         // The group helper may have removed other members, but it
                         // keeps the current key alive until this caller erases it.
                         if (!enable_oplog_ && !metadata.IsGrouped()) {
@@ -189,7 +187,6 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                             EraseMetadata(tenant_state, it, cursor->tenant_id,
                                           QuotaEraseMode::kFull, &shard);
                         }
-    
                         if (evict_result.evicted_objects > 0) {
                             evicted_count += evict_result.evicted_objects;
                             fifo_evicted_shards.set(shard_idx);
