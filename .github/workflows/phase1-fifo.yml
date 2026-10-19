@@ -30,6 +30,7 @@ jobs:
           cp phase1_fifo_patch.py /tmp/phase1_fifo_patch.py
           git fetch --tags origin
           git checkout --detach v0.3.13
+          git submodule update --init --recursive
           cp /tmp/phase1_fifo_patch.py ./phase1_fifo_patch.py
           git status --short
           git rev-parse HEAD
