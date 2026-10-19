@@ -124,88 +124,97 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
     std::bitset<kNumShards> fifo_evicted_shards;
 
     if (delete_budget > 0) {
-        const size_t start_idx = randomIndex(kNumShards);
-        for (size_t shard_offset = 0;
-             shard_offset < kNumShards && evicted_count < delete_budget;
-             ++shard_offset) {
-            const size_t shard_idx = (start_idx + shard_offset) % kNumShards;
-            std::vector<std::vector<Replica>> deferred_replicas;
-            {
-                MetadataShardAccessorRW shard(this, shard_idx);
-                auto* cursor = shard->fifo_head;
-                uint64_t last_seq = 0;
-                while (cursor != nullptr && evicted_count < delete_budget) {
-                    // Group eviction can unlink several nodes. In that case,
-                    // resume at the first remaining seq after the current one.
-                    // For an ordinary key, next_meta remains stable.
-                    auto* next = cursor->next_meta;
-                    const uint64_t current_seq = cursor->seq;
-                    const bool grouped = cursor->IsGrouped();
-                    auto tenant_it = shard->tenants.find(cursor->tenant_id);
-                    if (tenant_it == shard->tenants.end()) {
-                        last_seq = current_seq;
-                        cursor = next;
-                        continue;
-                    }
-                    auto& tenant_state = tenant_it->second;
-                    auto it = tenant_state.metadata.find(cursor->user_key);
-                    if (it == tenant_state.metadata.end()) {
-                        last_seq = current_seq;
-                        cursor = next;
-                        continue;
-                    }
-                    auto& metadata = it->second;
-                    if (metadata.IsHardPinned() ||
-                        !metadata.IsLeaseExpired(now) ||
-                        (!allow_evict_soft_pinned_objects_ && IsSoftPinActive(metadata, now)) ||
-                        !can_evict_replicas(metadata)) {
-                        last_seq = current_seq;
-                        cursor = next;
-                        continue;
-                    }
-
-                    auto evict_result = try_evict_group_or_object(
-                        cursor->tenant_id, cursor->user_key, metadata, shard,
-                        tenant_state, deferred_replicas,
-                        /*allow_soft_pinned=*/allow_evict_soft_pinned_objects_);
-                    total_freed_size += evict_result.freed_bytes;
-
-                    // The group helper may have removed other members, but it
-                    // keeps the current key alive until this caller erases it.
-                    if (!enable_oplog_ && !metadata.IsGrouped()) {
-                        PublishKvRemovedAfterEvict(
-                            cursor->user_key, evict_result.freed_bytes, "cpu",
-                            metadata, cursor->tenant_id);
-                    }
-                    if (!enable_oplog_ && !metadata.IsValid()) {
-                        EraseMetadata(tenant_state, it, cursor->tenant_id,
-                                      QuotaEraseMode::kFull, &shard);
-                    }
-
-                    if (evict_result.evicted_objects > 0) {
-                        evicted_count += evict_result.evicted_objects;
-                        fifo_evicted_shards.set(shard_idx);
-                    }
-                    last_seq = current_seq;
-                    if (grouped) {
-                        cursor = shard->fifo_head;
-                        while (cursor != nullptr && cursor->seq <= last_seq) {
-                            cursor = cursor->next_meta;
+        for (int soft_pin_pass = 0;
+            soft_pin_pass <
+                (allow_evict_soft_pinned_objects_ ? 2 : 1) &&
+                evicted_count < delete_budget;
+            ++soft_pin_pass) {
+            const bool allow_soft_pinned = (soft_pin_pass == 1);
+            const size_t start_idx = randomIndex(kNumShards);
+            for (size_t shard_offset = 0;
+                 shard_offset < kNumShards && evicted_count < delete_budget;
+                 ++shard_offset) {
+                const size_t shard_idx = (start_idx + shard_offset) % kNumShards;
+                std::vector<std::vector<Replica>> deferred_replicas;
+                {
+                    MetadataShardAccessorRW shard(this, shard_idx);
+                    auto* cursor = shard->fifo_head;
+                    uint64_t last_seq = 0;
+                    while (cursor != nullptr && evicted_count < delete_budget) {
+                        // Group eviction can unlink several nodes. In that case,
+                        // resume at the first remaining seq after the current one.
+                        // For an ordinary key, next_meta remains stable.
+                        auto* next = cursor->next_meta;
+                        const uint64_t current_seq = cursor->seq;
+                        const bool grouped = cursor->IsGrouped();
+                        auto tenant_it = shard->tenants.find(cursor->tenant_id);
+                        if (tenant_it == shard->tenants.end()) {
+                            last_seq = current_seq;
+                            cursor = next;
+                            continue;
                         }
-                    } else {
-                        cursor = next;
+                        auto& tenant_state = tenant_it->second;
+                        auto it = tenant_state.metadata.find(cursor->user_key);
+                        if (it == tenant_state.metadata.end()) {
+                            last_seq = current_seq;
+                            cursor = next;
+                            continue;
+                        }
+                        auto& metadata = it->second;
+                        if (metadata.IsHardPinned() ||
+                            !metadata.IsLeaseExpired(now) ||
+                            (allow_soft_pinned
+                                ? !IsSoftPinActive(metadata, now)
+                                : IsSoftPinActive(metadata, now)) ||
+                            !can_evict_replicas(metadata)) {
+                            last_seq = current_seq;
+                            cursor = next;
+                            continue;
+                        }
+    
+                        auto evict_result = try_evict_group_or_object(
+                            cursor->tenant_id, cursor->user_key, metadata, shard,
+                            tenant_state, deferred_replicas,
+                            /*allow_soft_pinned=*/allow_soft_pinned);
+                        total_freed_size += evict_result.freed_bytes;
+    
+                        // The group helper may have removed other members, but it
+                        // keeps the current key alive until this caller erases it.
+                        if (!enable_oplog_ && !metadata.IsGrouped()) {
+                            PublishKvRemovedAfterEvict(
+                                cursor->user_key, evict_result.freed_bytes, "cpu",
+                                metadata, cursor->tenant_id);
+                        }
+                        if (!enable_oplog_ && !metadata.IsValid()) {
+                            EraseMetadata(tenant_state, it, cursor->tenant_id,
+                                          QuotaEraseMode::kFull, &shard);
+                        }
+    
+                        if (evict_result.evicted_objects > 0) {
+                            evicted_count += evict_result.evicted_objects;
+                            fifo_evicted_shards.set(shard_idx);
+                        }
+                        last_seq = current_seq;
+                        if (grouped) {
+                            cursor = shard->fifo_head;
+                            while (cursor != nullptr && cursor->seq <= last_seq) {
+                                cursor = cursor->next_meta;
+                            }
+                        } else {
+                            cursor = next;
+                        }
+                    }
+                    for (auto tenant_it = shard->tenants.begin();
+                         tenant_it != shard->tenants.end();) {
+                        if (tenant_it->second.Empty()) {
+                            tenant_it = shard->tenants.erase(tenant_it);
+                        } else {
+                            ++tenant_it;
+                        }
                     }
                 }
-                for (auto tenant_it = shard->tenants.begin();
-                     tenant_it != shard->tenants.end();) {
-                    if (tenant_it->second.Empty()) {
-                        tenant_it = shard->tenants.erase(tenant_it);
-                    } else {
-                        ++tenant_it;
-                    }
-                }
+                deferred_replicas.clear();
             }
-            deferred_replicas.clear();
         }
     }
 
