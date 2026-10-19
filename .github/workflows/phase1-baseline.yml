@@ -1,0 +1,53 @@
+name: Mooncake v0.3.13 baseline build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - phase1-ci-harness
+    paths:
+      - '.github/workflows/phase1-baseline.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout pinned Mooncake v0.3.13
+        uses: actions/checkout@v4
+        with:
+          ref: v0.3.13
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build git pkg-config patchelf \
+            libibverbs-dev libunwind-dev libgoogle-glog-dev libjsoncpp-dev \
+            libnuma-dev libpython3-dev libboost-dev libssl-dev \
+            libgrpc-dev libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+            pybind11-dev libcurl4-openssl-dev libhiredis-dev libyaml-cpp-dev \
+            libjemalloc-dev libzstd-dev libmsgpack-dev libgflags-dev \
+            libxxhash-dev liburing-dev liblz4-dev
+
+      - name: Configure CMake
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_UNIT_TESTS=ON
+          -DWITH_TE=ON
+          -DWITH_STORE=ON
+          -DWITH_STORE_RUST=OFF
+          -DWITH_EP=OFF
+          -DUSE_CUDA=OFF
+
+      - name: Build existing master service test target
+        run: cmake --build build --target master_service_test -j2
+
+      - name: Run existing master service tests
+        run: ctest --test-dir build --output-on-failure -R '^master_service_test$'
