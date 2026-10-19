@@ -18,6 +18,11 @@ on:
         description: 'User who triggered this'
         required: false
         type: string
+      tent_only:
+        description: 'Run only the TENT integration-test job (skip classic/ascend/rocm legs)'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -30,7 +35,7 @@ concurrency:
 jobs:
   ascend-test:
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tent_only != true) ||
       github.event.label.name == 'run-e2e-ci'
     uses: ./.github/workflows/ci_ascend.yml
     with:
@@ -39,7 +44,7 @@ jobs:
 
   build-wheel-rocm:
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tent_only != true) ||
       github.event.label.name == 'run-e2e-ci'
     uses: ./.github/workflows/ci_rocm.yml
     with:
@@ -47,7 +52,7 @@ jobs:
 
   integration-test:
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tent_only != true) ||
       github.event.label.name == 'run-e2e-ci'
     uses: ./.github/workflows/integration-test.yml
     with:
@@ -57,7 +62,7 @@ jobs:
 
   rocm-integration-test:
     if: >
-      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tent_only != true) ||
       github.event.label.name == 'run-e2e-ci'
     needs:
       - build-wheel-rocm
