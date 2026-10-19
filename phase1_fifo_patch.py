@@ -157,7 +157,7 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                     auto& metadata = it->second;
                     if (metadata.IsHardPinned() ||
                         !metadata.IsLeaseExpired(now) ||
-                        IsSoftPinActive(metadata, now) ||
+                        (!allow_evict_soft_pinned_objects_ && IsSoftPinActive(metadata, now)) ||
                         !can_evict_replicas(metadata)) {
                         last_seq = current_seq;
                         cursor = next;
@@ -167,7 +167,7 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                     auto evict_result = try_evict_group_or_object(
                         cursor->tenant_id, cursor->user_key, metadata, shard,
                         tenant_state, deferred_replicas,
-                        /*allow_soft_pinned=*/false);
+                        /*allow_soft_pinned=*/allow_evict_soft_pinned_objects_);
                     total_freed_size += evict_result.freed_bytes;
 
                     // The group helper may have removed other members, but it
