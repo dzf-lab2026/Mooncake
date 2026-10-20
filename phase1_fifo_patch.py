@@ -55,6 +55,26 @@ h = replace_once(h, "    struct ObjectMetadata {\n", "    struct MetadataShard; 
 h = replace_once(h, "        const std::string user_key;\n\n        mutable SpinLock lock;", "        const std::string user_key;\n\n        // Phase 1 FIFO: intrusive links; protected by fifo_owner_shard->mutex.\n        uint64_t seq{0};\n        ObjectMetadata* pre_meta{nullptr};\n        ObjectMetadata* next_meta{nullptr};\n        MetadataShard* fifo_owner_shard{nullptr};\n\n        mutable SpinLock lock;", "ObjectMetadata FIFO fields")
 h = replace_once(h, "    struct MetadataShard {\n        mutable SharedMutex mutex;", "    struct MetadataShard {\n        mutable SharedMutex mutex;\n        ObjectMetadata* fifo_head GUARDED_BY(mutex) = nullptr;\n        ObjectMetadata* fifo_tail GUARDED_BY(mutex) = nullptr;\n\n        // Caller must hold this shard's mutex exclusively.\n        void LinkMetadata(ObjectMetadata& metadata, uint64_t new_seq) {\n            if (metadata.fifo_owner_shard == this) return;\n            if (metadata.fifo_owner_shard != nullptr) {\n                metadata.fifo_owner_shard->UnlinkMetadata(metadata);\n            }\n            metadata.seq = new_seq;\n            metadata.pre_meta = fifo_tail;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = this;\n            if (fifo_tail != nullptr) {\n                fifo_tail->next_meta = &metadata;\n            } else {\n                fifo_head = &metadata;\n            }\n            fifo_tail = &metadata;\n        }\n\n        // Caller must hold this shard's mutex exclusively. Idempotent.\n        void UnlinkMetadata(ObjectMetadata& metadata) {\n            if (metadata.fifo_owner_shard != this) return;\n            if (metadata.pre_meta != nullptr) {\n                metadata.pre_meta->next_meta = metadata.next_meta;\n            } else {\n                fifo_head = metadata.next_meta;\n            }\n            if (metadata.next_meta != nullptr) {\n                metadata.next_meta->pre_meta = metadata.pre_meta;\n            } else {\n                fifo_tail = metadata.pre_meta;\n            }\n            metadata.pre_meta = nullptr;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = nullptr;\n        }", "MetadataShard FIFO methods")
 h = replace_once(h, "    std::array<MetadataShard, kNumShards> metadata_shards_;", "    std::array<MetadataShard, kNumShards> metadata_shards_;\n    // Starts at 1; all insertions in this Master share one sequence space.\n    std::atomic<uint64_t> next_metadata_seq_{1};", "global FIFO sequence")
+create_anchor = '''            it_ = result.first;
+        }
+
+       private:'''
+
+create_replacement = '''            it_ = result.first;
+            if (result.second) {
+                shard_guard_->LinkMetadata(
+                    it_->second,
+                    service_->next_metadata_seq_.fetch_add(
+                        1, std::memory_order_relaxed));
+            }
+        }
+
+       private:'''
+
+h = replace_once(
+    h, create_anchor, create_replacement,
+    "MetadataAccessorRW::Create FIFO insertion"
+)
 changed[HEADER] = h
 
 # Source: make every metadata creation path link into its owning shard list.
