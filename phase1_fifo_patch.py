@@ -350,6 +350,46 @@ fifo_order_test = r'''TEST_F(MasterServiceTest, BatchEvictUsesFifoOrderWithinSha
         service_->ExistKey(newer_key, TenantId::Default()).value_or(false));
 }
 
+TEST_F(MasterServiceTest, BatchEvictHonorsSingleObjectBudget) {
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        *service_, "fifo_budget_segment", kDefaultSegmentBase,
+        16 * 1024 * 1024);
+
+    const UUID client_id = generate_uuid();
+    const size_t target_shard =
+        MetadataShardIndex(*service_, "fifo_budget_key_0");
+
+    std::vector<std::string> keys{"fifo_budget_key_0"};
+    for (size_t i = 1; keys.size() < 3; ++i) {
+        const std::string candidate =
+            "fifo_budget_key_" + std::to_string(i);
+        if (MetadataShardIndex(*service_, candidate) == target_shard) {
+            keys.push_back(candidate);
+        }
+    }
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    for (const auto& key : keys) {
+        PutCompletedObject(*service_, client_id, key, config);
+    }
+
+    // Three eligible objects with a target ratio of 1/3 should yield
+    // a one-object target budget (ceil(3 * 1/3) == 1).
+    service_->RunBatchEvictForTesting(1.0 / 3.0, 0.0);
+
+    EXPECT_FALSE(
+        service_->ExistKey(keys[0], TenantId::Default()).value_or(true));
+    EXPECT_TRUE(
+        service_->ExistKey(keys[1], TenantId::Default()).value_or(false));
+    EXPECT_TRUE(
+        service_->ExistKey(keys[2], TenantId::Default()).value_or(false));
+}
+
 '''
 
 anchor = "TEST_F(MasterServiceTest, TryEvictLeasedObject) {"
