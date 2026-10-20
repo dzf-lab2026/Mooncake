@@ -427,6 +427,44 @@ TEST_F(MasterServiceTest, GroupedBatchEvictUnlinksAllFifoMembers) {
     // A second pass must safely handle the now-empty eviction candidate set.
     EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
 }
+TEST_F(MasterServiceTest, GroupedEvictionMayExceedDeleteBudget) {
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        *service_, "fifo_group_budget_segment", kDefaultSegmentBase,
+        16 * 1024 * 1024);
+
+    const UUID client_id = generate_uuid();
+    const std::string key_a = "fifo_group_budget_a";
+    const std::string key_b = "fifo_group_budget_b";
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    config.group_ids =
+        std::vector<std::string>{FindGroupIdOnDifferentShard(key_a)};
+
+    PutCompletedObject(*service_, client_id, key_a, config);
+    PutCompletedObject(*service_, client_id, key_b, config);
+
+    ASSERT_TRUE(
+        service_->ExistKey(key_a, TenantId::Default()).value_or(false));
+    ASSERT_TRUE(
+        service_->ExistKey(key_b, TenantId::Default()).value_or(false));
+
+    // Two eligible objects with ratio 0.5 yield DeleteBudget == 1.
+    // Group eviction may remove both members in one operation.
+    service_->RunBatchEvictForTesting(0.5, 0.0);
+
+    EXPECT_FALSE(
+        service_->ExistKey(key_a, TenantId::Default()).value_or(true));
+    EXPECT_FALSE(
+        service_->ExistKey(key_b, TenantId::Default()).value_or(true));
+
+    // The FIFO list must remain valid after the group overshoots the budget.
+    EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
+}
 
 '''
 
