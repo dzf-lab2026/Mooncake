@@ -65,13 +65,36 @@ standby_new = '''            auto [restored_it, restored_inserted] = tenant_stat
 c = replace_once(c, standby_old, standby_new, "standby metadata restore insertion")
 
 put_anchor = '''        return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);\n    }\n    if (enable_multi_tenants_) {\n        auto adopt_result = it->second.quota_ledger.AdoptPendingCharge('''
-put_replacement = '''        return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);\n    }\n    shard->LinkMetadata(it->second,\n        next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n    if (enable_multi_tenants_) {\n        auto adopt_result = it->second.quota_ledger.AdoptPendingCharge('''
+put_replacement = '''        return tl::make_unexpected(ErrorCode::OBJECT_ALREADY_EXISTS);\n    }\n    if (enable_multi_tenants_) {\n        auto adopt_result = it->second.quota_ledger.AdoptPendingCharge('''
 c = replace_once(c, put_anchor, put_replacement, "normal PutStart insertion")
 
 restore_anchor = '''        auto [it, inserted] = tenant_state.metadata.emplace(\n            std::piecewise_construct, std::forward_as_tuple(std::move(key)),\n            std::forward_as_tuple(\n                metadata_ptr->client_id, metadata_ptr->put_start_time,\n                metadata_ptr->size, metadata_ptr->PopReplicas(), std::nullopt,\n                metadata_ptr->IsHardPinned(), metadata_ptr->data_type,\n                metadata_ptr->group_id, tenant_id, user_key));\n\n        it->second.lease_timeout = metadata_ptr->lease_timeout;'''
 restore_replacement = '''        auto [it, inserted] = tenant_state.metadata.emplace(\n            std::piecewise_construct, std::forward_as_tuple(std::move(key)),\n            std::forward_as_tuple(\n                metadata_ptr->client_id, metadata_ptr->put_start_time,\n                metadata_ptr->size, metadata_ptr->PopReplicas(), std::nullopt,\n                metadata_ptr->IsHardPinned(), metadata_ptr->data_type,\n                metadata_ptr->group_id, tenant_id, user_key));\n        if (inserted) {\n            shard.LinkMetadata(it->second,\n                service_->next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n        }\n\n        it->second.lease_timeout = metadata_ptr->lease_timeout;'''
 c = replace_once(c, restore_anchor, restore_replacement, "snapshot metadata restore insertion")
+put_end_anchor = '''    // If the object is completed, remove it from the processing set.
+    if (metadata.AllReplicas(&Replica::fn_is_completed) &&
+        accessor.InProcessing()) {
+        accessor.EraseFromProcessing();
+    }
 
+    SyncCacheTotalAccounting(metadata);'''
+
+put_end_replacement = '''    // Only fully completed objects enter FIFO. A partial PutEnd must not
+    // make the object eligible for eviction.
+    if (metadata.AllReplicas(&Replica::fn_is_completed)) {
+        if (accessor.InProcessing()) {
+            accessor.EraseFromProcessing();
+        }
+        accessor.GetShard()->LinkMetadata(
+            metadata, next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));
+    }
+
+    SyncCacheTotalAccounting(metadata);'''
+
+c = replace_once(
+    c, put_end_anchor, put_end_replacement, "PutEnd FIFO insertion"
+)
+changed[SOURCE] = c
 # Central deletion path plus the one insertion rollback path that erases directly.
 erase_anchor = "    auto next = tenant_state.metadata.erase(it);\n    if (had_completed_disk && shard) {"
 erase_replacement = "    if (metadata.fifo_owner_shard != nullptr) {\n        metadata.fifo_owner_shard->UnlinkMetadata(metadata);\n    }\n    auto next = tenant_state.metadata.erase(it);\n    if (had_completed_disk && shard) {"
