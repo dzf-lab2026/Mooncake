@@ -37,7 +37,10 @@ for p in (HEADER, SOURCE, TESTS_CMAKE, MASTER_TEST_SOURCE):
     if not p.is_file():
         sys.exit(f"ERROR: {p.relative_to(ROOT)} not found; run from Mooncake v0.3.13 repo root")
 
-originals = {p: p.read_text() for p in (HEADER, SOURCE, TESTS_CMAKE)}
+originals = {
+    p: p.read_text()
+    for p in (HEADER, SOURCE, TESTS_CMAKE, MASTER_TEST_SOURCE)
+}
 changed = dict(originals)
 
 def replace_once(text, old, new, label):
