@@ -380,6 +380,38 @@ TEST_F(FifoMetadataTest, IntrusiveListInsertionAndUnlinkBoundaries) {
     RunIntrusiveListBoundaryTest();
 }
 
+TEST_F(FifoMetadataTest, RepeatedLinkDoesNotDuplicateOrReorderNode) {
+    using Clock = std::chrono::system_clock;
+    const auto now = Clock::now();
+    MasterService::MetadataShard shard;
+    MasterService::ObjectMetadata a(UUID{}, now, 1, {});
+    MasterService::ObjectMetadata b(UUID{}, now, 1, {});
+    MasterService::ObjectMetadata c(UUID{}, now, 1, {});
+
+    shard.LinkMetadata(a, 1);
+    shard.LinkMetadata(b, 2);
+    shard.LinkMetadata(c, 3);
+
+    // Re-linking an object already owned by this shard must be a no-op.
+    shard.LinkMetadata(b, 4);
+
+    EXPECT_EQ(shard.fifo_head, &a);
+    EXPECT_EQ(shard.fifo_tail, &c);
+    EXPECT_EQ(a.next_meta, &b);
+    EXPECT_EQ(b.pre_meta, &a);
+    EXPECT_EQ(b.next_meta, &c);
+    EXPECT_EQ(c.pre_meta, &b);
+    EXPECT_EQ(b.seq, 2);
+
+    // Removing the middle node must preserve the remaining FIFO order.
+    shard.UnlinkMetadata(b);
+    EXPECT_EQ(shard.fifo_head, &a);
+    EXPECT_EQ(shard.fifo_tail, &c);
+    EXPECT_EQ(a.next_meta, &c);
+    EXPECT_EQ(c.pre_meta, &a);
+    EXPECT_EQ(b.fifo_owner_shard, nullptr);
+}
+
 }  // namespace mooncake::test
 '''
 
