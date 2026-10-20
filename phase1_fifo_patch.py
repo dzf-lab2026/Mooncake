@@ -31,8 +31,9 @@ HEADER = ROOT / "mooncake-store/include/master_service.h"
 SOURCE = ROOT / "mooncake-store/src/master_service.cpp"
 TESTS_CMAKE = ROOT / "mooncake-store/tests/CMakeLists.txt"
 TEST_SOURCE = ROOT / "mooncake-store/tests/master_service_fifo_test.cpp"
+MASTER_TEST_SOURCE = ROOT / "mooncake-store/tests/master_service_test.cpp"
 
-for p in (HEADER, SOURCE, TESTS_CMAKE):
+for p in (HEADER, SOURCE, TESTS_CMAKE, MASTER_TEST_SOURCE):
     if not p.is_file():
         sys.exit(f"ERROR: {p.relative_to(ROOT)} not found; run from Mooncake v0.3.13 repo root")
 
@@ -308,6 +309,53 @@ cm_anchor = "add_store_test(master_service_test master_service_test.cpp)"
 cm = replace_once(cm, cm_anchor, cm_anchor + "\nadd_store_test(master_service_fifo_test master_service_fifo_test.cpp)", "CMake FIFO test target")
 changed[TESTS_CMAKE] = cm
 
+master_test = changed[MASTER_TEST_SOURCE]
+
+fifo_order_test = r'''TEST_F(MasterServiceTest, BatchEvictUsesFifoOrderWithinShard) {
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        *service_, "fifo_order_segment", kDefaultSegmentBase,
+        16 * 1024 * 1024);
+
+    const UUID client_id = generate_uuid();
+    const std::string oldest_key = "fifo_order_key_0";
+    const size_t target_shard =
+        MetadataShardIndex(*service_, oldest_key);
+
+    std::string newer_key;
+    for (size_t i = 1; newer_key.empty(); ++i) {
+        const std::string candidate =
+            "fifo_order_key_" + std::to_string(i);
+        if (MetadataShardIndex(*service_, candidate) == target_shard) {
+            newer_key = candidate;
+        }
+    }
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+    PutCompletedObject(*service_, client_id, oldest_key, config);
+    PutCompletedObject(*service_, client_id, newer_key, config);
+
+    service_->RunBatchEvictForTesting(0.5, 0.0);
+
+    EXPECT_FALSE(
+        service_->ExistKey(oldest_key, TenantId::Default()).value_or(true));
+    EXPECT_TRUE(
+        service_->ExistKey(newer_key, TenantId::Default()).value_or(false));
+}
+
+'''
+
+anchor = "TEST_F(MasterServiceTest, TryEvictLeasedObject) {"
+master_test = replace_once(
+    master_test, anchor, fifo_order_test + anchor,
+    "BatchEvict FIFO order integration test"
+)
+changed[MASTER_TEST_SOURCE] = master_test
+
 test_content = r'''#include <gtest/gtest.h>
 
 #include <chrono>
@@ -430,7 +478,7 @@ TEST_SOURCE.write_text(test_content)
 
 patch_path = ROOT / "mooncake_fifo_phase1.patch"
 with patch_path.open("w") as out:
-    for p in (HEADER, SOURCE, TESTS_CMAKE):
+    for p in (HEADER, SOURCE, TESTS_CMAKE, MASTER_TEST_SOURCE):
         out.writelines(difflib.unified_diff(
             originals[p].splitlines(keepends=True), changed[p].splitlines(keepends=True),
             fromfile="a/" + str(p.relative_to(ROOT)),
