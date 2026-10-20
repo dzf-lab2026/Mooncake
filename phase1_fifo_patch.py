@@ -466,6 +466,94 @@ TEST_F(MasterServiceTest, GroupedEvictionMayExceedDeleteBudget) {
     EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
 }
 
+TEST_F(MasterServiceTest, BatchEvictMaintainsPerShardFifoAndGlobalBudget) {
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        *service_, "fifo_multi_shard_segment", kDefaultSegmentBase,
+        16 * 1024 * 1024);
+
+    const UUID client_id = generate_uuid();
+
+    // Find two keys that belong to the same shard.
+    const std::string oldest_a = "fifo_multi_shard_a_0";
+    const size_t shard_a = MetadataShardIndex(*service_, oldest_a);
+
+    std::string newer_a;
+    for (size_t i = 0; newer_a.empty(); ++i) {
+        const std::string candidate =
+            "fifo_multi_shard_a_" + std::to_string(i);
+        if (candidate != oldest_a &&
+            MetadataShardIndex(*service_, candidate) == shard_a) {
+            newer_a = candidate;
+        }
+    }
+
+    // Find a second shard, then two keys belonging to that shard.
+    std::string oldest_b;
+    for (size_t i = 0; oldest_b.empty(); ++i) {
+        const std::string candidate =
+            "fifo_multi_shard_b_" + std::to_string(i);
+        if (MetadataShardIndex(*service_, candidate) != shard_a) {
+            oldest_b = candidate;
+        }
+    }
+    const size_t shard_b = MetadataShardIndex(*service_, oldest_b);
+
+    std::string newer_b;
+    for (size_t i = 0; newer_b.empty(); ++i) {
+        const std::string candidate =
+            "fifo_multi_shard_b_" + std::to_string(i);
+        if (candidate != oldest_b &&
+            MetadataShardIndex(*service_, candidate) == shard_b) {
+            newer_b = candidate;
+        }
+    }
+
+    ASSERT_NE(shard_a, shard_b);
+
+    ReplicateConfig config;
+    config.replica_num = 1;
+
+    // Preserve insertion order within each shard.
+    PutCompletedObject(*service_, client_id, oldest_a, config);
+    PutCompletedObject(*service_, client_id, newer_a, config);
+    PutCompletedObject(*service_, client_id, oldest_b, config);
+    PutCompletedObject(*service_, client_id, newer_b, config);
+
+    // Four eligible objects, target ratio 25% => DeleteBudget == 1.
+    service_->RunBatchEvictForTesting(0.25, 0.0);
+
+    const bool oldest_a_exists =
+        service_->ExistKey(oldest_a, TenantId::Default()).value_or(false);
+    const bool newer_a_exists =
+        service_->ExistKey(newer_a, TenantId::Default()).value_or(false);
+    const bool oldest_b_exists =
+        service_->ExistKey(oldest_b, TenantId::Default()).value_or(false);
+    const bool newer_b_exists =
+        service_->ExistKey(newer_b, TenantId::Default()).value_or(false);
+
+    // Exactly one oldest object is evicted; the other shard is untouched.
+    // The newer object in either shard must not be evicted before its older peer.
+    EXPECT_NE(oldest_a_exists, oldest_b_exists);
+    EXPECT_TRUE(newer_a_exists);
+    EXPECT_TRUE(newer_b_exists);
+
+    // A full-budget pass should then remove all remaining eligible objects.
+    service_->RunBatchEvictForTesting(1.0, 0.0);
+
+    EXPECT_FALSE(
+        service_->ExistKey(oldest_a, TenantId::Default()).value_or(true));
+    EXPECT_FALSE(
+        service_->ExistKey(newer_a, TenantId::Default()).value_or(true));
+    EXPECT_FALSE(
+        service_->ExistKey(oldest_b, TenantId::Default()).value_or(true));
+    EXPECT_FALSE(
+        service_->ExistKey(newer_b, TenantId::Default()).value_or(true));
+}
+
 '''
 
 anchor = "TEST_F(MasterServiceTest, TryEvictLeasedObject) {"
