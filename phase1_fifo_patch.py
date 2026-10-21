@@ -410,6 +410,39 @@ helper_replacement = """    std::optional<uint64_t> GetFifoSequence(
 master_test = replace_once(master_test, helper_anchor, helper_replacement,
                            "FIFO inspection helpers")
 
+# Align the existing upstream automatic-eviction regression with the approved
+# strict DeleteBudget rule: if the complete Group cannot fit the cycle budget,
+# skip that Group instead of deleting more Metadata than budgeted.
+group_test_start = """TEST_F(MasterServiceTest,
+       GroupedEvictionExpandsSafeMembersAndSkipsLeasedGroup) {"""
+group_test_end = "\\nTEST_F(MasterServiceTest, GroupedEvictionSkipsUnsafeMembersAndEvictsSafePeers)"
+if master_test.count(group_test_start) != 1:
+    raise RuntimeError("anchor 'upstream grouped eviction regression': expected exactly 1 match")
+group_start = master_test.index(group_test_start)
+group_end = master_test.index(group_test_end, group_start)
+group_test = master_test[group_start:group_end]
+group_test = replace_once(
+    group_test,
+    "GroupedEvictionExpandsSafeMembersAndSkipsLeasedGroup",
+    "GroupedEvictionSkipsOverBudgetGroupAndSkipsLeasedGroup",
+    "strict-budget grouped eviction test name",
+)
+old_a = """        EXPECT_FALSE(service_->ExistKey(evict_key_a, TenantId::Default())
+                         .value_or(true));"""
+old_b = """        EXPECT_FALSE(service_->ExistKey(evict_key_b, TenantId::Default())
+                         .value_or(true));"""
+new_a = """        // The automatic cycle's DeleteBudget cannot fit both members.
+        // Strict budget semantics therefore skip the whole Group this cycle.
+        EXPECT_TRUE(service_->ExistKey(evict_key_a, TenantId::Default())
+                        .value_or(false));"""
+new_b = """        EXPECT_TRUE(service_->ExistKey(evict_key_b, TenantId::Default())
+                        .value_or(false));"""
+group_test = replace_once(group_test, old_a, new_a,
+                          "strict-budget grouped key A expectation")
+group_test = replace_once(group_test, old_b, new_b,
+                          "strict-budget grouped key B expectation")
+master_test = master_test[:group_start] + group_test + master_test[group_end:]
+
 fifo_order_test = r'''TEST_F(MasterServiceTest, FifoAgeStartsAtCompletionAndRepeatedPutEndIsIdempotent) {
     auto service_config =
         MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
