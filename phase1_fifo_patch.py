@@ -52,12 +52,12 @@ def replace_once(text, old, new, label):
 # Header: declare the nested shard type before ObjectMetadata so metadata can
 # remember its owning shard; intrusive links live in ObjectMetadata itself.
 h = changed[HEADER]
-h = replace_once(h, "#include <array>\n", "#include <array>\n#include <bitset>\n", "bitset include")
+h = replace_once(h, "#include <array>\n", "#include <array>\n#include <cassert>\n#include <bitset>\n", "assert and bitset includes")
 h = replace_once(h, "namespace test {\nclass MasterServiceTest;", "namespace test {\nclass MasterServiceTest;\nclass FifoMetadataTest;", "test forward declaration")
 h = replace_once(h, "class MasterService {\n", "class MasterService {\n    friend class test::FifoMetadataTest;\n", "fifo test friend")
 h = replace_once(h, "    struct ObjectMetadata {\n", "    struct MetadataShard;  // forward declaration for intrusive FIFO owner\n\n    struct ObjectMetadata {\n", "MetadataShard forward declaration")
 h = replace_once(h, "        const std::string user_key;\n\n        mutable SpinLock lock;", "        const std::string user_key;\n\n        // Phase 1 FIFO: intrusive links; protected by fifo_owner_shard->mutex.\n        uint64_t seq{0};\n        ObjectMetadata* pre_meta{nullptr};\n        ObjectMetadata* next_meta{nullptr};\n        MetadataShard* fifo_owner_shard{nullptr};\n\n        mutable SpinLock lock;", "ObjectMetadata FIFO fields")
-h = replace_once(h, "    struct MetadataShard {\n        mutable SharedMutex mutex;", "    struct MetadataShard {\n        mutable SharedMutex mutex;\n        ObjectMetadata* fifo_head GUARDED_BY(mutex) = nullptr;\n        ObjectMetadata* fifo_tail GUARDED_BY(mutex) = nullptr;\n\n        // Caller must hold this shard's mutex exclusively.\n        void LinkMetadata(ObjectMetadata& metadata, uint64_t new_seq) {\n            if (metadata.fifo_owner_shard == this) return;\n            if (metadata.fifo_owner_shard != nullptr) {\n                metadata.fifo_owner_shard->UnlinkMetadata(metadata);\n            }\n            metadata.seq = new_seq;\n            metadata.pre_meta = fifo_tail;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = this;\n            if (fifo_tail != nullptr) {\n                fifo_tail->next_meta = &metadata;\n            } else {\n                fifo_head = &metadata;\n            }\n            fifo_tail = &metadata;\n        }\n\n        // Caller must hold this shard's mutex exclusively. Idempotent.\n        void UnlinkMetadata(ObjectMetadata& metadata) {\n            if (metadata.fifo_owner_shard != this) return;\n            if (metadata.pre_meta != nullptr) {\n                metadata.pre_meta->next_meta = metadata.next_meta;\n            } else {\n                fifo_head = metadata.next_meta;\n            }\n            if (metadata.next_meta != nullptr) {\n                metadata.next_meta->pre_meta = metadata.pre_meta;\n            } else {\n                fifo_tail = metadata.pre_meta;\n            }\n            metadata.pre_meta = nullptr;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = nullptr;\n        }", "MetadataShard FIFO methods")
+h = replace_once(h, "    struct MetadataShard {\n        mutable SharedMutex mutex;", "    struct MetadataShard {\n        mutable SharedMutex mutex;\n        ObjectMetadata* fifo_head GUARDED_BY(mutex) = nullptr;\n        ObjectMetadata* fifo_tail GUARDED_BY(mutex) = nullptr;\n\n        // Caller must hold this shard's mutex exclusively.\n        void LinkMetadata(ObjectMetadata& metadata, uint64_t new_seq) {\n            if (metadata.fifo_owner_shard != nullptr) {\n                assert(metadata.fifo_owner_shard == this);\n                return;\n            }\n            metadata.seq = new_seq;\n            metadata.pre_meta = fifo_tail;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = this;\n            if (fifo_tail != nullptr) {\n                fifo_tail->next_meta = &metadata;\n            } else {\n                fifo_head = &metadata;\n            }\n            fifo_tail = &metadata;\n        }\n\n        // Caller must hold this shard's mutex exclusively. Idempotent.\n        void UnlinkMetadata(ObjectMetadata& metadata) {\n            if (metadata.fifo_owner_shard != this) return;\n            if (metadata.pre_meta != nullptr) {\n                metadata.pre_meta->next_meta = metadata.next_meta;\n            } else {\n                fifo_head = metadata.next_meta;\n            }\n            if (metadata.next_meta != nullptr) {\n                metadata.next_meta->pre_meta = metadata.pre_meta;\n            } else {\n                fifo_tail = metadata.pre_meta;\n            }\n            metadata.pre_meta = nullptr;\n            metadata.next_meta = nullptr;\n            metadata.fifo_owner_shard = nullptr;\n        }", "MetadataShard FIFO methods")
 h = replace_once(h, "    std::array<MetadataShard, kNumShards> metadata_shards_;", "    std::array<MetadataShard, kNumShards> metadata_shards_;\n    // Starts at 1; all insertions in this Master share one sequence space.\n    std::atomic<uint64_t> next_metadata_seq_{1};", "global FIFO sequence")
 create_anchor = '''            it_ = result.first;
         }
@@ -65,12 +65,6 @@ create_anchor = '''            it_ = result.first;
        private:'''
 
 create_replacement = '''            it_ = result.first;
-            if (result.second) {
-                shard_guard_->LinkMetadata(
-                    it_->second,
-                    service_->next_metadata_seq_.fetch_add(
-                        1, std::memory_order_relaxed));
-            }
         }
 
        private:'''
@@ -84,7 +78,7 @@ changed[HEADER] = h
 # Source: make every metadata creation path link into its owning shard list.
 c = changed[SOURCE]
 standby_old = '''            tenant_state.metadata.emplace(\n                std::piecewise_construct,\n                std::forward_as_tuple(object.user_key),\n                std::forward_as_tuple(\n                    standby_meta.client_id, now, standby_meta.size,\n                    std::move(object.replicas), std::nullopt,\n                    standby_meta.hard_pinned.value_or(false),\n                    standby_meta.data_type, standby_meta.group_id,\n                    object.tenant_id, object.user_key));\n            if (!standby_meta.group_id.empty()) {'''
-standby_new = '''            auto [restored_it, restored_inserted] = tenant_state.metadata.emplace(\n                std::piecewise_construct,\n                std::forward_as_tuple(object.user_key),\n                std::forward_as_tuple(\n                    standby_meta.client_id, now, standby_meta.size,\n                    std::move(object.replicas), std::nullopt,\n                    standby_meta.hard_pinned.value_or(false),\n                    standby_meta.data_type, standby_meta.group_id,\n                    object.tenant_id, object.user_key));\n            if (restored_inserted) {\n                shard->LinkMetadata(restored_it->second,\n                    next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n            }\n            if (!standby_meta.group_id.empty()) {'''
+standby_new = '''            auto [restored_it, restored_inserted] = tenant_state.metadata.emplace(\n                std::piecewise_construct,\n                std::forward_as_tuple(object.user_key),\n                std::forward_as_tuple(\n                    standby_meta.client_id, now, standby_meta.size,\n                    std::move(object.replicas), std::nullopt,\n                    standby_meta.hard_pinned.value_or(false),\n                    standby_meta.data_type, standby_meta.group_id,\n                    object.tenant_id, object.user_key));\n            if (restored_inserted &&\n                restored_it->second.AllReplicas(&Replica::fn_is_completed)) {\n                shard->LinkMetadata(\n                    restored_it->second,\n                    next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n            }\n            if (!standby_meta.group_id.empty()) {'''
 # The accessor in this restore path is MetadataShardAccessorRW, hence shard->.
 c = replace_once(c, standby_old, standby_new, "standby metadata restore insertion")
 
@@ -93,7 +87,7 @@ put_replacement = '''        return tl::make_unexpected(ErrorCode::OBJECT_ALREAD
 c = replace_once(c, put_anchor, put_replacement, "normal PutStart insertion")
 
 restore_anchor = '''        auto [it, inserted] = tenant_state.metadata.emplace(\n            std::piecewise_construct, std::forward_as_tuple(std::move(key)),\n            std::forward_as_tuple(\n                metadata_ptr->client_id, metadata_ptr->put_start_time,\n                metadata_ptr->size, metadata_ptr->PopReplicas(), std::nullopt,\n                metadata_ptr->IsHardPinned(), metadata_ptr->data_type,\n                metadata_ptr->group_id, tenant_id, user_key));\n\n        it->second.lease_timeout = metadata_ptr->lease_timeout;'''
-restore_replacement = '''        auto [it, inserted] = tenant_state.metadata.emplace(\n            std::piecewise_construct, std::forward_as_tuple(std::move(key)),\n            std::forward_as_tuple(\n                metadata_ptr->client_id, metadata_ptr->put_start_time,\n                metadata_ptr->size, metadata_ptr->PopReplicas(), std::nullopt,\n                metadata_ptr->IsHardPinned(), metadata_ptr->data_type,\n                metadata_ptr->group_id, tenant_id, user_key));\n        if (inserted) {\n            shard.LinkMetadata(it->second,\n                service_->next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n        }\n\n        it->second.lease_timeout = metadata_ptr->lease_timeout;'''
+restore_replacement = '''        auto [it, inserted] = tenant_state.metadata.emplace(\n            std::piecewise_construct, std::forward_as_tuple(std::move(key)),\n            std::forward_as_tuple(\n                metadata_ptr->client_id, metadata_ptr->put_start_time,\n                metadata_ptr->size, metadata_ptr->PopReplicas(), std::nullopt,\n                metadata_ptr->IsHardPinned(), metadata_ptr->data_type,\n                metadata_ptr->group_id, tenant_id, user_key));\n        if (inserted &&\n            it->second.AllReplicas(&Replica::fn_is_completed)) {\n            shard.LinkMetadata(\n                it->second,\n                service_->next_metadata_seq_.fetch_add(1, std::memory_order_relaxed));\n        }\n\n        it->second.lease_timeout = metadata_ptr->lease_timeout;'''
 c = replace_once(c, restore_anchor, restore_replacement, "snapshot metadata restore insertion")
 put_end_anchor = '''    // If the object is completed, remove it from the processing set.
     if (metadata.AllReplicas(&Replica::fn_is_completed) &&
@@ -137,6 +131,66 @@ c, clear_count = re.subn(r"^(\s*)shard\.tenants\.clear\(\);$",
                           reset_shard_roots, c, flags=re.MULTILINE)
 if clear_count != 2:
     raise RuntimeError(f"snapshot tenant clear anchors: expected 2, found {clear_count}")
+# Enforce DeleteBudget before processing a Group. Count only members that
+# pass the same eligibility checks as the mutation loop; if the entire eligible
+# set cannot fit, leave the Group untouched for this eviction cycle.
+helper_start = c.index("    auto try_evict_group_or_object =")
+helper_end = c.index("\\n    // Candidate carries key", helper_start)
+helper = c[helper_start:helper_end]
+helper_sig_old = """                  std::vector<std::vector<Replica>>& deferred_replicas,
+                  bool allow_soft_pinned) -> EvictionResult {"""
+helper_sig_new = """                  std::vector<std::vector<Replica>>& deferred_replicas,
+                  long remaining_delete_budget,
+                  bool allow_soft_pinned) -> EvictionResult {"""
+helper = replace_once(helper, helper_sig_old, helper_sig_new,
+                      "Group eviction budget parameter")
+helper_members_old = """        EvictionResult result;
+        std::vector<std::string> member_keys(group_it->second.begin(),
+                                             group_it->second.end());
+        for (const auto& member_key : member_keys) {"""
+helper_members_new = """        std::vector<std::string> member_keys(group_it->second.begin(),
+                                             group_it->second.end());
+        long eligible_group_members = 0;
+        for (const auto& member_key : member_keys) {
+            auto member_it = tenant_state.metadata.find(member_key);
+            if (member_it == tenant_state.metadata.end()) {
+                continue;
+            }
+            const auto& member_metadata = member_it->second;
+            if (member_metadata.IsHardPinned() ||
+                !member_metadata.AllReplicas(&Replica::fn_is_completed) ||
+                !member_metadata.IsLeaseExpired(now) ||
+                (!allow_soft_pinned &&
+                 IsSoftPinActive(member_metadata, now)) ||
+                !can_evict_replicas(member_metadata)) {
+                continue;
+            }
+            ++eligible_group_members;
+        }
+        if (eligible_group_members > remaining_delete_budget) {
+            VLOG(1) << "[FIFO-EVICT-GROUP-SKIP] group_id="
+                    << metadata.group_id
+                    << ", eligible_members=" << eligible_group_members
+                    << ", remaining_delete_budget=" << remaining_delete_budget;
+            return {};
+        }
+
+        EvictionResult result;
+        for (const auto& member_key : member_keys) {"""
+helper = replace_once(helper, helper_members_old, helper_members_new,
+                      "Group budget preflight")
+helper_loop_old = """            if (member_metadata.IsHardPinned() ||
+                !member_metadata.IsLeaseExpired(now) ||
+                (!allow_soft_pinned && IsSoftPinActive(member_metadata, now)) ||
+                !can_evict_replicas(member_metadata)) {"""
+helper_loop_new = """            if (member_metadata.IsHardPinned() ||
+                !member_metadata.AllReplicas(&Replica::fn_is_completed) ||
+                !member_metadata.IsLeaseExpired(now) ||
+                (!allow_soft_pinned && IsSoftPinActive(member_metadata, now)) ||
+                !can_evict_replicas(member_metadata)) {"""
+helper = replace_once(helper, helper_loop_old, helper_loop_new,
+                      "Group member completed-state guard")
+c = c[:helper_start] + helper + c[helper_end:]
 changed[SOURCE] = c
 
 # Phase 1: preserve the existing safe replica/offload/OpLog/group deletion
@@ -145,7 +199,7 @@ changed[SOURCE] = c
 c = changed[SOURCE]
 phase1_anchor = "    // Candidate carries key for safe lookup after releasing shard lock."
 phase1_end_anchor = "\nvoid MasterService::NoFBatchEvict"
-phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
+phase1 = r'''    // ===== Phase 1: FIFO eviction (v8) =====
     // DeleteBudget counts successfully evicted metadata objects, not scanned
     // entries. Phase 1 deliberately has no ScanBudget or scheduler rounds.
     // Preserve the existing lock order: snapshot before any shard lock.
@@ -157,7 +211,9 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
         DiscardExpiredProcessingReplicas(shard, now);
         for (const auto& [tenant_id, tenant_state] : shard->tenants) {
             for (const auto& [key, metadata] : tenant_state.metadata) {
-                if (!metadata.IsHardPinned() && can_evict_replicas(metadata)) {
+                if (!metadata.IsHardPinned() &&
+                    metadata.AllReplicas(&Replica::fn_is_completed) &&
+                    can_evict_replicas(metadata)) {
                     ++total_eviction_base;
                 }
             }
@@ -209,6 +265,7 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                         }
                         auto& metadata = it->second;
                         if (metadata.IsHardPinned() ||
+                            !metadata.AllReplicas(&Replica::fn_is_completed) ||
                             !metadata.IsLeaseExpired(now) ||
                             (allow_soft_pinned
                                 ? !IsSoftPinActive(metadata, now)
@@ -221,6 +278,7 @@ phase1 = r'''    // ===== Phase 1: FIFO eviction (v7) =====
                         auto evict_result = try_evict_group_or_object(
                             cursor->tenant_id, cursor->user_key, metadata, shard,
                             tenant_state, deferred_replicas,
+                            delete_budget - evicted_count,
                             /*allow_soft_pinned=*/allow_soft_pinned);
                         total_freed_size += evict_result.freed_bytes;
                         // The group helper may have removed other members, but it
@@ -314,7 +372,74 @@ changed[TESTS_CMAKE] = cm
 
 master_test = changed[MASTER_TEST_SOURCE]
 
-fifo_order_test = r'''TEST_F(MasterServiceTest, BatchEvictUsesFifoOrderWithinShard) {
+helper_anchor = "    size_t MetadataBucketCount(\\n        MasterService& service, size_t shard_idx,"
+helper_replacement = """    std::optional<uint64_t> GetFifoSequence(
+        MasterService& service, const std::string& key,
+        const TenantId& tenant_id = TenantId::Default()) {
+        const TenantId normalized_tenant =
+            service.ResolveRequestTenantId(tenant_id);
+        const size_t shard_idx =
+            service.getMetadataShardIndex(normalized_tenant, key);
+        MasterService::MetadataShardAccessorRO shard(&service, shard_idx);
+        const auto tenant_it = shard->tenants.find(normalized_tenant);
+        if (tenant_it == shard->tenants.end()) return std::nullopt;
+        const auto metadata_it = tenant_it->second.metadata.find(key);
+        if (metadata_it == tenant_it->second.metadata.end() ||
+            metadata_it->second.fifo_owner_shard == nullptr) {
+            return std::nullopt;
+        }
+        return metadata_it->second.seq;
+    }
+
+    std::optional<std::string> GetFifoHeadKey(
+        MasterService& service, const std::string& key,
+        const TenantId& tenant_id = TenantId::Default()) {
+        const TenantId normalized_tenant =
+            service.ResolveRequestTenantId(tenant_id);
+        const size_t shard_idx =
+            service.getMetadataShardIndex(normalized_tenant, key);
+        MasterService::MetadataShardAccessorRO shard(&service, shard_idx);
+        if (shard->fifo_head == nullptr) return std::nullopt;
+        return shard->fifo_head->user_key;
+    }
+
+    size_t MetadataBucketCount(
+        MasterService& service, size_t shard_idx,"""
+master_test = replace_once(master_test, helper_anchor, helper_replacement,
+                           "FIFO inspection helpers")
+
+fifo_order_test = r'''TEST_F(MasterServiceTest, FifoAgeStartsAtCompletionAndRepeatedPutEndIsIdempotent) {
+    auto service_config =
+        MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
+    std::unique_ptr<MasterService> service_(new MasterService(service_config));
+    [[maybe_unused]] const auto context = PrepareSimpleSegment(
+        *service_, "fifo_completion_segment", kDefaultSegmentBase,
+        16 * 1024 * 1024);
+    const UUID client_id = generate_uuid();
+    const std::string key = "fifo_completion_key";
+    ReplicateConfig config;
+    config.replica_num = 1;
+
+    ASSERT_TRUE(service_->PutStart(client_id, key, TenantId::Default(), 1024,
+                                  config).has_value());
+    EXPECT_FALSE(GetFifoSequence(*service_, key).has_value());
+    EXPECT_FALSE(GetFifoHeadKey(*service_, key).has_value());
+
+    ASSERT_TRUE(service_->PutEnd(client_id, key, TenantId::Default(),
+                                 ReplicaType::MEMORY).has_value());
+    const auto first_seq = GetFifoSequence(*service_, key);
+    ASSERT_TRUE(first_seq.has_value());
+    EXPECT_GT(*first_seq, 0u);
+    EXPECT_EQ(GetFifoHeadKey(*service_, key), key);
+
+    // PutEnd retry is idempotent: no second node and no new FIFO age.
+    ASSERT_TRUE(service_->PutEnd(client_id, key, TenantId::Default(),
+                                 ReplicaType::MEMORY).has_value());
+    EXPECT_EQ(GetFifoSequence(*service_, key), first_seq);
+    EXPECT_EQ(GetFifoHeadKey(*service_, key), key);
+}
+
+TEST_F(MasterServiceTest, BatchEvictUsesFifoOrderWithinShard) {
     auto service_config =
         MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
     std::unique_ptr<MasterService> service_(new MasterService(service_config));
@@ -427,7 +552,7 @@ TEST_F(MasterServiceTest, GroupedBatchEvictUnlinksAllFifoMembers) {
     // A second pass must safely handle the now-empty eviction candidate set.
     EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
 }
-TEST_F(MasterServiceTest, GroupedEvictionMayExceedDeleteBudget) {
+TEST_F(MasterServiceTest, GroupedEvictionSkipsGroupWhenDeleteBudgetIsInsufficient) {
     auto service_config =
         MasterServiceConfig::builder().set_default_kv_lease_ttl(0).build();
     std::unique_ptr<MasterService> service_(new MasterService(service_config));
@@ -454,16 +579,21 @@ TEST_F(MasterServiceTest, GroupedEvictionMayExceedDeleteBudget) {
         service_->ExistKey(key_b, TenantId::Default()).value_or(false));
 
     // Two eligible objects with ratio 0.5 yield DeleteBudget == 1.
-    // Group eviction may remove both members in one operation.
+    // Since the complete two-member group cannot fit, neither member is
+    // evicted in this cycle.
     service_->RunBatchEvictForTesting(0.5, 0.0);
 
+    EXPECT_TRUE(
+        service_->ExistKey(key_a, TenantId::Default()).value_or(false));
+    EXPECT_TRUE(
+        service_->ExistKey(key_b, TenantId::Default()).value_or(false));
+
+    // A later cycle with enough budget may evict the complete group.
+    EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
     EXPECT_FALSE(
         service_->ExistKey(key_a, TenantId::Default()).value_or(true));
     EXPECT_FALSE(
         service_->ExistKey(key_b, TenantId::Default()).value_or(true));
-
-    // The FIFO list must remain valid after the group overshoots the budget.
-    EXPECT_NO_THROW(service_->RunBatchEvictForTesting(1.0, 0.0));
 }
 
 TEST_F(MasterServiceTest, BatchEvictMaintainsPerShardFifoAndGlobalBudget) {
