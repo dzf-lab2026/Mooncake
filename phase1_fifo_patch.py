@@ -415,7 +415,7 @@ master_test = replace_once(master_test, helper_anchor, helper_replacement,
 # skip that Group instead of deleting more Metadata than budgeted.
 group_test_start = """TEST_F(MasterServiceTest,
        GroupedEvictionExpandsSafeMembersAndSkipsLeasedGroup) {"""
-group_test_end = "\\nTEST_F(MasterServiceTest, GroupedEvictionSkipsUnsafeMembersAndEvictsSafePeers)"
+group_test_end = "\nTEST_F(MasterServiceTest, GroupedEvictionSkipsUnsafeMembersAndEvictsSafePeers)"
 if master_test.count(group_test_start) != 1:
     raise RuntimeError("anchor 'upstream grouped eviction regression': expected exactly 1 match")
 group_start = master_test.index(group_test_start)
