@@ -188,8 +188,10 @@ helper_loop_new = """            if (member_metadata.IsHardPinned() ||
                 !member_metadata.IsLeaseExpired(now) ||
                 (!allow_soft_pinned && IsSoftPinActive(member_metadata, now)) ||
                 !can_evict_replicas(member_metadata)) {"""
-helper = replace_once(helper, helper_loop_old, helper_loop_new,
-                      "Group member completed-state guard")
+mutation_start = helper.index("        EvictionResult result;")
+helper = helper[:mutation_start] + replace_once(
+    helper[mutation_start:], helper_loop_old, helper_loop_new,
+    "Group member completed-state guard")
 c = c[:helper_start] + helper + c[helper_end:]
 changed[SOURCE] = c
 
