@@ -374,7 +374,7 @@ changed[TESTS_CMAKE] = cm
 
 master_test = changed[MASTER_TEST_SOURCE]
 
-helper_anchor = "    size_t MetadataBucketCount(\\n        MasterService& service, size_t shard_idx,"
+helper_anchor = "    size_t MetadataBucketCount(\n        MasterService& service, size_t shard_idx,"
 helper_replacement = """    std::optional<uint64_t> GetFifoSequence(
         MasterService& service, const std::string& key,
         const TenantId& tenant_id = TenantId::Default()) {
