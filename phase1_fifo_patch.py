@@ -135,7 +135,7 @@ if clear_count != 2:
 # pass the same eligibility checks as the mutation loop; if the entire eligible
 # set cannot fit, leave the Group untouched for this eviction cycle.
 helper_start = c.index("    auto try_evict_group_or_object =")
-helper_end = c.index("\\n    // Candidate carries key", helper_start)
+helper_end = c.index("\n    // Candidate carries key", helper_start)
 helper = c[helper_start:helper_end]
 helper_sig_old = """                  std::vector<std::vector<Replica>>& deferred_replicas,
                   bool allow_soft_pinned) -> EvictionResult {"""
